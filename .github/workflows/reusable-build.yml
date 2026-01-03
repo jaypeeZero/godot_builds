@@ -1,0 +1,49 @@
+name: Reusable Build & Test
+
+on:
+  workflow_call:
+    inputs:
+      godot_version:
+        description: 'Godot version (e.g., 4.5-stable)'
+        required: false
+        type: string
+        default: '4.5-stable'
+      test_script:
+        description: 'Path to test script (e.g., ./run-tests.sh)'
+        required: false
+        type: string
+        default: ''
+      main_scene:
+        description: 'Path to main scene for validation'
+        required: false
+        type: string
+        default: ''
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Godot
+        run: |
+          wget https://github.com/godotengine/godot/releases/download/${{ inputs.godot_version }}/Godot_v${{ inputs.godot_version }}_linux.x86_64.zip
+          unzip Godot_v${{ inputs.godot_version }}_linux.x86_64.zip
+          chmod +x Godot_v${{ inputs.godot_version }}_linux.x86_64
+          sudo mv Godot_v${{ inputs.godot_version }}_linux.x86_64 /usr/local/bin/godot
+
+      - name: Import Godot resources
+        run: godot --headless --import --quit
+
+      - name: Run tests
+        if: ${{ inputs.test_script != '' }}
+        run: |
+          chmod +x ${{ inputs.test_script }}
+          ${{ inputs.test_script }}
+
+      - name: Validate main scene
+        if: ${{ inputs.main_scene != '' }}
+        run: |
+          timeout 3 godot --headless ${{ inputs.main_scene }} || test $? -eq 124

@@ -1,0 +1,212 @@
+name: Reusable Release
+
+on:
+  workflow_call:
+    inputs:
+      game_name:
+        description: 'Game name for releases and filenames'
+        required: true
+        type: string
+      godot_version:
+        description: 'Godot version (e.g., 4.5-stable)'
+        required: false
+        type: string
+        default: '4.5-stable'
+      version:
+        description: 'Release version (e.g., v1.0.0)'
+        required: true
+        type: string
+      test_script:
+        description: 'Path to test script (e.g., ./run-tests.sh)'
+        required: false
+        type: string
+        default: ''
+      main_scene:
+        description: 'Path to main scene for validation'
+        required: false
+        type: string
+        default: ''
+      skip_tests:
+        description: 'Skip the test job'
+        required: false
+        type: boolean
+        default: false
+      ftp_upload_enabled:
+        description: 'Enable FTP upload'
+        required: false
+        type: boolean
+        default: false
+      ftp_remote_dir:
+        description: 'FTP remote directory'
+        required: false
+        type: string
+        default: 'downloads/'
+      itch_upload_enabled:
+        description: 'Enable itch.io upload'
+        required: false
+        type: boolean
+        default: false
+      itch_target:
+        description: 'itch.io target (user/game)'
+        required: false
+        type: string
+        default: ''
+    secrets:
+      ftp_server:
+        required: false
+      ftp_username:
+        required: false
+      ftp_password:
+        required: false
+      butler_credentials:
+        required: false
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    if: ${{ !inputs.skip_tests }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Godot
+        run: |
+          wget https://github.com/godotengine/godot/releases/download/${{ inputs.godot_version }}/Godot_v${{ inputs.godot_version }}_linux.x86_64.zip
+          unzip Godot_v${{ inputs.godot_version }}_linux.x86_64.zip
+          chmod +x Godot_v${{ inputs.godot_version }}_linux.x86_64
+          sudo mv Godot_v${{ inputs.godot_version }}_linux.x86_64 /usr/local/bin/godot
+
+      - name: Import Godot resources
+        run: godot --headless --import --quit
+
+      - name: Run tests
+        if: ${{ inputs.test_script != '' }}
+        run: |
+          chmod +x ${{ inputs.test_script }}
+          ${{ inputs.test_script }}
+
+      - name: Validate main scene
+        if: ${{ inputs.main_scene != '' }}
+        run: |
+          timeout 3 godot --headless ${{ inputs.main_scene }} || test $? -eq 124
+
+  build-release:
+    needs: test
+    if: always() && (needs.test.result == 'success' || needs.test.result == 'skipped')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Export game builds
+        id: export
+        uses: firebelley/godot-export@v7.0.0
+        with:
+          godot_executable_download_url: https://github.com/godotengine/godot/releases/download/${{ inputs.godot_version }}/Godot_v${{ inputs.godot_version }}_linux.x86_64.zip
+          godot_export_templates_download_url: https://github.com/godotengine/godot/releases/download/${{ inputs.godot_version }}/Godot_v${{ inputs.godot_version }}_export_templates.tpz
+          relative_project_path: ./
+          archive_output: true
+          cache: true
+
+      - name: Rename builds with version
+        run: |
+          cd ${{ steps.export.outputs.archive_directory }}
+          VERSION="${{ inputs.version }}"
+          GAME="${{ inputs.game_name }}"
+          for file in *.zip; do
+            if [[ $file == *"macOS"* ]]; then
+              mv "$file" "${GAME}-${VERSION}-macOS.zip"
+            elif [[ $file == *"Linux"* ]]; then
+              mv "$file" "${GAME}-${VERSION}-Linux.zip"
+            elif [[ $file == *"Windows"* ]]; then
+              mv "$file" "${GAME}-${VERSION}-Windows.zip"
+            fi
+          done
+          ls -la
+
+      - name: Create release and upload builds
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.version }}
+          name: ${{ inputs.game_name }} ${{ inputs.version }}
+          generate_release_notes: true
+          files: |
+            ${{ steps.export.outputs.archive_directory }}/*.zip
+          body: |
+            ## Downloads
+
+            - **Windows**: ${{ inputs.game_name }}-${{ inputs.version }}-Windows.zip
+            - **macOS**: ${{ inputs.game_name }}-${{ inputs.version }}-macOS.zip
+            - **Linux**: ${{ inputs.game_name }}-${{ inputs.version }}-Linux.zip
+
+            ### Installation
+            - **Windows**: Extract and run `${{ inputs.game_name }}.exe`
+            - **macOS**: Extract and run `${{ inputs.game_name }}.app` (you may need to right-click > Open first time)
+            - **Linux**: Extract, make executable (`chmod +x`), and run
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+
+      - name: Upload builds artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-builds
+          path: ${{ steps.export.outputs.archive_directory }}/*.zip
+          retention-days: 1
+
+  ftp-upload:
+    needs: build-release
+    if: ${{ inputs.ftp_upload_enabled }}
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download builds artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: release-builds
+          path: ./builds
+
+      - name: Upload builds to FTP server
+        uses: SamKirkland/FTP-Deploy-Action@v4.3.5
+        with:
+          server: ${{ secrets.ftp_server }}
+          username: ${{ secrets.ftp_username }}
+          password: ${{ secrets.ftp_password }}
+          protocol: ftp
+          local-dir: ./builds/
+          server-dir: ${{ inputs.ftp_remote_dir }}
+          exclude: |
+            **/addons*/**
+            **/.git*
+            **/.git*/**
+
+  itch-upload:
+    needs: build-release
+    if: ${{ inputs.itch_upload_enabled }}
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download builds artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: release-builds
+          path: ./builds
+
+      - name: Install butler
+        run: |
+          curl -L -o butler.zip https://broth.itch.ovh/butler/linux-amd64/LATEST/archive/default
+          unzip butler.zip
+          chmod +x butler
+          ./butler -V
+
+      - name: Upload to itch.io
+        env:
+          BUTLER_API_KEY: ${{ secrets.butler_credentials }}
+        run: |
+          ./butler push ./builds/*-Windows.zip "${{ inputs.itch_target }}:windows-latest" --userversion "${{ inputs.version }}"
+          ./butler push ./builds/*-Linux.zip "${{ inputs.itch_target }}:linux-latest" --userversion "${{ inputs.version }}"
+          ./butler push ./builds/*-macOS.zip "${{ inputs.itch_target }}:macos-latest" --userversion "${{ inputs.version }}"
+          ./butler status "${{ inputs.itch_target }}"
